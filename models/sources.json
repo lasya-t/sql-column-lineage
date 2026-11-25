@@ -1,0 +1,6 @@
+{
+  "raw.orders":      {"order_id": "bigint", "customer_id": "bigint", "ordered_at": "timestamp", "status": "varchar", "amount": "decimal", "discount": "decimal"},
+  "raw.order_items": {"order_id": "bigint", "line_no": "int", "sku": "varchar", "qty": "int", "unit_price": "decimal"},
+  "raw.customers":   {"customer_id": "bigint", "email": "varchar", "state": "varchar", "created_at": "timestamp"},
+  "raw.products":    {"sku": "varchar", "category": "varchar", "cost": "decimal"}
+}
