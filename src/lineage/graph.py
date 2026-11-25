@@ -18,6 +18,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.lineage import lineage
 from sqlglot.optimizer.qualify import qualify
+from sqlglot.optimizer.scope import traverse_scope
 
 DIALECT = "duckdb"
 
@@ -27,6 +28,9 @@ class Graph:
     # edges: "model.column" -> set of direct parent "table.column"
     parents: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     models: dict[str, list[str]] = field(default_factory=dict)  # model -> output columns
+    # model -> columns of its inputs used in WHERE / JOIN / GROUP BY / HAVING: they change
+    # which rows are counted, even though they don't flow into any output value
+    row_filters: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
 
     def children(self) -> dict[str, set[str]]:
         out = defaultdict(set)
@@ -49,11 +53,19 @@ class Graph:
                     stack.append(p)
         return leaves
 
-    def downstream(self, col: str) -> set[str]:
-        """Every column, in any model, that would change if `col` changed."""
+    def downstream(self, col: str, include_filters: bool = False) -> set[str]:
+        """Every column, in any model, that would change if `col` changed.
+
+        include_filters=True also follows row-level effects: if `col` is used in a model's
+        WHERE / JOIN / GROUP BY, every output column of that model can change.
+        """
         kids, seen, stack = self.children(), set(), [col]
         while stack:
-            for k in kids.get(stack.pop(), set()):
+            c = stack.pop()
+            nxt = set(kids.get(c, set()))
+            if include_filters:
+                nxt |= {f"{m}.{o}" for m, used in self.row_filters.items() if c in used for o in self.models[m]}
+            for k in nxt:
                 if k not in seen:
                     seen.add(k)
                     stack.append(k)
@@ -109,6 +121,23 @@ def _leaf_columns(node) -> set[str]:
     return out
 
 
+def _row_filter_columns(tree) -> set[str]:
+    """Physical-table columns referenced in WHERE, JOIN ON, GROUP BY or HAVING, in any scope."""
+    out = set()
+    for scope in traverse_scope(tree):
+        tables = {alias: src for alias, src in scope.sources.items() if isinstance(src, exp.Table)}
+        sel = scope.expression
+        clauses = [sel.args.get(k) for k in ("where", "group", "having")]
+        clauses += [j.args.get("on") for j in sel.args.get("joins") or []]
+        for clause in filter(None, clauses):
+            for c in clause.find_all(exp.Column):
+                t = tables.get(c.table)
+                if t is not None:
+                    table = ".".join(p for p in (t.db if t.db != "main" else "", t.name) if p)
+                    out.add(_unquote(f"{table}.{c.name}"))
+    return out
+
+
 def build(model_dir: str | Path, sources_file: str | Path) -> Graph:
     model_dir = Path(model_dir)
     sources = json.loads(Path(sources_file).read_text())
@@ -121,6 +150,7 @@ def build(model_dir: str | Path, sources_file: str | Path) -> Graph:
         tree = qualify(sqlglot.parse_one(sql, read=DIALECT), schema=nested, dialect=DIALECT, db="main")
         cols = [s.alias_or_name for s in tree.selects]
         g.models[name] = cols
+        g.row_filters[name] = _row_filter_columns(tree)
         schema[name] = {c: "unknown" for c in cols}
         for col in cols:
             node = lineage(col, tree, schema=nested, dialect=DIALECT)
