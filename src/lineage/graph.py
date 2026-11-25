@@ -94,13 +94,18 @@ def _nested_schema(flat: dict[str, dict]) -> dict:
     return dict(out)
 
 
+def _unquote(name: str) -> str:
+    # qualify() quotes every identifier ("qty"); strip quotes so names match across models
+    return name.replace('"', "")
+
+
 def _leaf_columns(node) -> set[str]:
     out = set()
     for n in node.walk():
         if not n.downstream and isinstance(n.expression, exp.Table):
             t = n.expression
             table = ".".join(p for p in (t.db if t.db != "main" else "", t.name) if p)
-            out.add(f"{table}.{n.name.split('.')[-1]}")
+            out.add(_unquote(f"{table}.{n.name.split('.')[-1]}"))
     return out
 
 
